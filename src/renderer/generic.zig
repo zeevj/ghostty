@@ -569,6 +569,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             colorspace: configpkg.Config.WindowColorspace,
             blending: configpkg.Config.AlphaBlending,
             background_blur: configpkg.Config.BackgroundBlur,
+            macos_background_from_layer: bool,
             scroll_to_bottom_on_output: bool,
 
             pub fn init(
@@ -643,6 +644,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .colorspace = config.@"window-colorspace",
                     .blending = config.@"alpha-blending",
                     .background_blur = config.@"background-blur",
+                    .macos_background_from_layer = config.@"macos-background-from-layer",
                     .scroll_to_bottom_on_output = config.@"scroll-to-bottom".output,
                     .arena = arena,
                 };
@@ -729,9 +731,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         options.config.background.r,
                         options.config.background.g,
                         options.config.background.b,
-                        // Note that if we're on macOS with glass effects
-                        // we'll disable background opacity but we handle
-                        // that in updateFrame.
+                        // Glass effects and layer-background mode zero this
+                        // out in updateFrame; use the config value for now.
                         @intFromFloat(@round(options.config.background_opacity * 255.0)),
                     },
                     .bools = .{
@@ -1396,13 +1397,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // If we're on macOS and have glass styles, we remove
                 // the background opacity because the glass effect handles
                 // it.
-                if (comptime builtin.os.tag == .macos) switch (self.config.background_blur) {
-                    .@"macos-glass-regular",
-                    .@"macos-glass-clear",
-                    => self.uniforms.bg_color[3] = 0,
+                if (comptime builtin.os.tag == .macos) {
+                    switch (self.config.background_blur) {
+                        .@"macos-glass-regular",
+                        .@"macos-glass-clear",
+                        => self.uniforms.bg_color[3] = 0,
 
-                    else => {},
-                };
+                        else => {},
+                    }
+                    // When the host app provides background via CALayer,
+                    // skip the GPU background fill to avoid double-stacking.
+                    if (self.config.macos_background_from_layer)
+                        self.uniforms.bg_color[3] = 0;
+                }
 
                 // Prepare our overlay image for upload (or unload). This
                 // has to use our general allocator since it modifies
