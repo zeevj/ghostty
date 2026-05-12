@@ -49,7 +49,11 @@ fn advanceShaperCellIndexToX(
     shaper_cells_i: *usize,
     x: usize,
 ) void {
-    while (run_offset + shaped_cells[shaper_cells_i.*].x < x) {
+    // A text run can contain terminal cells that produce no shaped glyphs
+    // (for example, an empty tail after IME preedit covered the only glyph).
+    while (shaper_cells_i.* < shaped_cells.len and
+        run_offset + shaped_cells[shaper_cells_i.*].x < x)
+    {
         shaper_cells_i.* += 1;
     }
 }
