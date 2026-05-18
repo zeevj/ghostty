@@ -359,6 +359,10 @@ test "url regex" {
             .expect = "/tmp/test folder/file.txt",
         },
         .{
+            .input = "Start with /Users/tester/Recovered Screen Recordings/2026-05-18/screen-recording-2026-05-15-raw.mp4. It is a 75 MB Screen Studio recording, 46s long.",
+            .expect = "/Users/tester/Recovered Screen Recordings/2026-05-18/screen-recording-2026-05-15-raw.mp4",
+        },
+        .{
             .input = "/tmp/test  folder/file.txt",
             .expect = "/tmp/test",
         },
