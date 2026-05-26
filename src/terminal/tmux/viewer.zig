@@ -230,6 +230,10 @@ pub const Viewer = struct {
                         const value = @field(self, u_field.name);
                         switch (u_field.type) {
                             []const u8 => try writer.print("\"{s}\"", .{std.mem.trim(u8, value, " \t\r\n")}),
+                            PaneOutput => try writer.print(
+                                ".{{ .pane_id = {}, .data_len = {} }}",
+                                .{ value.pane_id, value.data.len },
+                            ),
                             else => try writer.print("{any}", .{value}),
                         }
                     }
@@ -244,6 +248,22 @@ pub const Viewer = struct {
         pane_id: usize,
         data: []const u8,
     };
+
+    test "pane output action format redacts data" {
+        var writer: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer writer.deinit();
+
+        try (Action{ .pane_output = .{
+            .pane_id = 7,
+            .data = "secret-pane-output",
+        } }).format(&writer.writer);
+
+        const formatted = writer.written();
+        try testing.expect(std.mem.containsAtLeast(u8, formatted, 1, "pane_output"));
+        try testing.expect(std.mem.containsAtLeast(u8, formatted, 1, "pane_id = 7"));
+        try testing.expect(std.mem.containsAtLeast(u8, formatted, 1, "data_len = 18"));
+        try testing.expect(!std.mem.containsAtLeast(u8, formatted, 1, "secret-pane-output"));
+    }
 
     pub const Input = union(enum) {
         /// Data from tmux was received that needs to be processed.
