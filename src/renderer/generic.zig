@@ -1765,13 +1765,25 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // If our health value hasn't changed, then we do nothing. We don't
             // do a cmpxchg here because strict atomicity isn't important.
             if (self.health.load(.seq_cst) != health) {
-                self.health.store(health, .seq_cst);
-
-                // Our health value changed, so we notify the surface so that it
-                // can do something about it.
-                _ = self.surface_mailbox.push(.{
+                // cmux iOS fork: this callback runs INLINE on the same serial
+                // dispatch queue that drives `renderNow` (sync=true) and also
+                // owns input/resize/output. A `.forever` push here blocks that
+                // one queue permanently whenever `surface_mailbox` is full —
+                // which happens during a fast pinch-zoom resize storm, where
+                // frames flip health faster than the main-thread app tick
+                // (the mailbox's only drainer) can keep up. Once it wedges,
+                // the tick can never run to drain it, so it never recovers and
+                // the whole terminal freezes.
+                //
+                // Push non-blocking instead and only commit the new health if
+                // it was actually enqueued. A dropped notification is harmless:
+                // the next health change re-fires it (the guard only suppresses
+                // a *stored* value), so health is delivered best-effort without
+                // ever blocking frame recycling.
+                const pushed = self.surface_mailbox.push(.{
                     .renderer_health = health,
-                }, .{ .forever = {} });
+                }, .{ .instant = {} });
+                if (pushed > 0) self.health.store(health, .seq_cst);
             }
 
             // Always release our semaphore
