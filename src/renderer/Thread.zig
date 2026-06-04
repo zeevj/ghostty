@@ -91,6 +91,10 @@ app_mailbox: App.Mailbox,
 /// Configuration we need derived from the main config.
 config: DerivedConfig,
 
+/// cmux iOS fork: count of bounded frame-state acquire timeouts, used to
+/// throttle the greppable `render.frame.acquire.timeout` log line. Wraps.
+frame_acquire_timeouts: u64 = 0,
+
 flags: packed struct {
     /// This is true when a blinking cursor should be visible and false
     /// when it should not be visible. This is toggled on a timer by the
@@ -523,8 +527,25 @@ fn drawFrame(self: *Thread, now: bool) void {
             .{ .instant = {} },
         );
     } else {
-        self.renderer.drawFrame(false) catch |err|
-            log.warn("error drawing err={}", .{err});
+        self.renderer.drawFrame(false) catch |err| switch (err) {
+            // cmux iOS fork: a bounded frame-state acquire timed out under GPU
+            // backpressure; the frame is SKIPPED and the display link
+            // re-requests on the next tick. Occasional timeouts = a transient
+            // completion backlog that the bounded wait bridged (healthy).
+            // Continuous timeouts = a true permanent GPU completion stall (the
+            // surface-rebuild escalation, tracked separately, is then needed).
+            // Log greppably but throttled so a storm doesn't flood the log.
+            error.Timeout => {
+                self.frame_acquire_timeouts +%= 1;
+                if (self.frame_acquire_timeouts % 30 == 1) {
+                    log.warn(
+                        "render.frame.acquire.timeout count={}",
+                        .{self.frame_acquire_timeouts},
+                    );
+                }
+            },
+            else => log.warn("error drawing err={}", .{err}),
+        };
     }
 }
 
