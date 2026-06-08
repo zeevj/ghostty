@@ -20,6 +20,49 @@ const log = std.log.scoped(.app);
 
 const SurfaceList = std.ArrayListUnmanaged(*apprt.Surface);
 
+const SurfaceRegistryMutationKind = enum {
+    add,
+    delete,
+};
+
+const SurfaceRegistryMutationProbeForTesting = struct {
+    entered_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    overlap_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    first_mutation_should_wait: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    first_mutation_entered: std.Thread.ResetEvent = .{},
+    release_first_mutation: std.Thread.ResetEvent = .{},
+
+    fn begin(self: *SurfaceRegistryMutationProbeForTesting, kind: SurfaceRegistryMutationKind) void {
+        _ = kind;
+
+        const previous = self.entered_count.fetchAdd(1, .seq_cst);
+        if (previous > 0) {
+            _ = self.overlap_count.fetchAdd(1, .seq_cst);
+            self.release_first_mutation.set();
+            return;
+        }
+
+        if (self.first_mutation_should_wait.swap(false, .seq_cst)) {
+            self.first_mutation_entered.set();
+            self.release_first_mutation.timedWait(500 * std.time.ns_per_ms) catch {};
+        }
+    }
+
+    fn end(self: *SurfaceRegistryMutationProbeForTesting) void {
+        _ = self.entered_count.fetchSub(1, .seq_cst);
+    }
+};
+
+var surface_registry_mutation_probe_for_testing: ?*SurfaceRegistryMutationProbeForTesting = null;
+
+fn beginSurfaceRegistryMutationProbeForTesting(kind: SurfaceRegistryMutationKind) ?*SurfaceRegistryMutationProbeForTesting {
+    if (!builtin.is_test) return null;
+
+    const probe = surface_registry_mutation_probe_for_testing orelse return null;
+    probe.begin(kind);
+    return probe;
+}
+
 /// General purpose allocator
 alloc: Allocator,
 
@@ -168,6 +211,9 @@ pub fn addSurface(
     self: *App,
     rt_surface: *apprt.Surface,
 ) Allocator.Error!void {
+    const mutation_probe_for_testing = beginSurfaceRegistryMutationProbeForTesting(.add);
+    defer if (mutation_probe_for_testing) |probe| probe.end();
+
     try self.surfaces.append(self.alloc, rt_surface);
 
     // Since we have non-zero surfaces, we can cancel the quit timer.
@@ -185,6 +231,9 @@ pub fn addSurface(
 /// Delete the surface from the known surface list. This will NOT call the
 /// destructor or free the memory.
 pub fn deleteSurface(self: *App, rt_surface: *apprt.Surface) void {
+    const mutation_probe_for_testing = beginSurfaceRegistryMutationProbeForTesting(.delete);
+    defer if (mutation_probe_for_testing) |probe| probe.end();
+
     // If this surface is the focused surface then we need to clear it.
     // There was a bug where we relied on hasSurface to return false and
     // just let focused surface be but the allocator was reusing addresses
@@ -602,3 +651,77 @@ pub const Wasm = if (!builtin.target.isWasm()) struct {} else struct {
     //     }
     // }
 };
+
+const SurfaceRegistryMutationTestContext = struct {
+    app: *App,
+    surface: *apprt.Surface,
+
+    fn add(self: *SurfaceRegistryMutationTestContext) void {
+        self.app.addSurface(self.surface) catch unreachable;
+    }
+
+    fn delete(self: *SurfaceRegistryMutationTestContext) void {
+        self.app.deleteSurface(self.surface);
+    }
+};
+
+fn testWakeup(_: ?*anyopaque) callconv(.c) void {}
+
+fn testAction(_: *apprt.App, _: apprt.Target.C, _: apprt.Action.C) callconv(.c) bool {
+    return true;
+}
+
+test "surface registry mutations are serialized" {
+    if (comptime !@hasField(apprt.App, "opts")) return error.SkipZigTest;
+    if (comptime !@hasField(apprt.Surface, "app")) return error.SkipZigTest;
+
+    var app: App = undefined;
+    try app.init(std.testing.allocator);
+    defer {
+        app.surfaces.deinit(std.testing.allocator);
+        app.font_grid_set.deinit();
+    }
+
+    var rt_app: apprt.App = undefined;
+    rt_app.core_app = &app;
+    rt_app.opts = undefined;
+    rt_app.opts.action = testAction;
+    rt_app.opts.wakeup = testWakeup;
+
+    var surface: apprt.Surface = undefined;
+    surface.app = &rt_app;
+
+    var probe: SurfaceRegistryMutationProbeForTesting = .{};
+    surface_registry_mutation_probe_for_testing = &probe;
+    defer surface_registry_mutation_probe_for_testing = null;
+
+    var add_context: SurfaceRegistryMutationTestContext = .{
+        .app = &app,
+        .surface = &surface,
+    };
+    var add_thread = try std.Thread.spawn(
+        .{},
+        SurfaceRegistryMutationTestContext.add,
+        .{&add_context},
+    );
+
+    try probe.first_mutation_entered.timedWait(std.time.ns_per_s);
+
+    var delete_context: SurfaceRegistryMutationTestContext = .{
+        .app = &app,
+        .surface = &surface,
+    };
+    var delete_thread = try std.Thread.spawn(
+        .{},
+        SurfaceRegistryMutationTestContext.delete,
+        .{&delete_context},
+    );
+
+    add_thread.join();
+    delete_thread.join();
+
+    surface_registry_mutation_probe_for_testing = null;
+    if (app.hasRtSurface(&surface)) app.deleteSurface(&surface);
+
+    try std.testing.expectEqual(@as(u32, 0), probe.overlap_count.load(.seq_cst));
+}
