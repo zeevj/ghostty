@@ -2828,17 +2828,21 @@ pub const CAPI = struct {
         /// Darwin-only by placement: iOS owns occlusion via `renderingSuspended`
         /// and must not be driven through this path. The message is
         /// non-idempotent (it must strictly alternate with the swap chain's
-        /// `defunct` state), so it is pushed `.forever` and never dropped. The
-        /// caller (cmux) guarantees alternation: it never realizes an already-
-        /// realized surface (which would trip `displayRealized`'s
-        /// `assert(swap_chain.defunct)`) nor unrealizes an already-unrealized one.
-        export fn ghostty_surface_set_renderer_realized(ptr: *Surface, realized: bool) void {
+        /// `defunct` state), so the caller (cmux) must only advance its own
+        /// realize/unrealize state when this returns `true`. Even a `.forever`
+        /// push can fail to enqueue: `BlockingQueue.push` returns 0 if the queue
+        /// is still full after a (possibly spurious) wakeup. Returning the
+        /// enqueue result lets cmux keep its mirror state in sync and retry,
+        /// rather than believing an un-queued realize/unrealize took effect and
+        /// later tripping `displayRealized`'s `assert(swap_chain.defunct)`.
+        export fn ghostty_surface_set_renderer_realized(ptr: *Surface, realized: bool) bool {
             const surface = &ptr.core_surface;
-            _ = surface.renderer_thread.mailbox.push(
+            const enqueued = surface.renderer_thread.mailbox.push(
                 .{ .display_realized = realized },
                 .{ .forever = {} },
-            );
+            ) != 0;
             surface.renderer_thread.wakeup.notify() catch {};
+            return enqueued;
         }
 
         /// This returns a CTFontRef that should be used for quicklook
