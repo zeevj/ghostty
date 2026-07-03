@@ -1,0 +1,45 @@
+name: Build BiDi GhosttyKit xcframework
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "ghostty ref to build"
+        default: "feat/bidi-shaping-11079"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      GHOSTTYKIT_CRASH_REPORT_SUBDIR: cmux/crash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install zig 0.15.2
+        run: |
+          set -euo pipefail
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz"
+          tar -xJf zig.tar.xz
+          echo "$PWD/zig-aarch64-macos-0.15.2" >> "$GITHUB_PATH"
+
+      - name: Build GhosttyKit.xcframework
+        run: |
+          set -euo pipefail
+          zig version
+          zig build -Dcrash-report-subdir="$GHOSTTYKIT_CRASH_REPORT_SUBDIR" -Demit-xcframework=true -Demit-macos-app=false -Dxcframework-target=universal -Doptimize=ReleaseFast
+
+      - name: Package xcframework
+        run: |
+          set -euo pipefail
+          COPYFILE_DISABLE=1 tar czf GhosttyKit.xcframework.tar.gz -C macos GhosttyKit.xcframework
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GhosttyKit-xcframework-bidi
+          path: GhosttyKit.xcframework.tar.gz
+          retention-days: 7
